@@ -167,10 +167,15 @@ function useKVState(nodeType) {
         });
     })
 }
-var helpDOM;
-if (!app.helpDOM) {
+var helpDOM = app.VHSHelp;
+if (!app.VHSHelp) {
     helpDOM = document.createElement("div");
     app.VHSHelp = helpDOM
+} else {
+    app.extensionManager.dialog
+      .showErrorDialog('Please check your custom_nodes directory and manually remove the duplicate.',
+                       { title: 'Duplicate VHS install detected' })
+    throw new Error('Duplicate VHS install detected. Check your custom_nodes directory')
 }
 function initHelpDOM() {
     let parentDOM = document.createElement("div");
@@ -458,6 +463,17 @@ function allowDragFromWidget(widget) {
     }
 }
 
+//Cloud specific auth code. Short circuits if not on cloud
+async function getAuthHeader() {
+  try {
+    const authStore = await api.getAuthStore()
+    return authStore ? await authStore.getAuthHeader() : null
+  } catch (error) {
+    console.warn('Failed to get auth header:', error)
+    return null
+  }
+}
+
 async function uploadFile(file, progressCallback) {
     try {
         // Wrap file in formdata so it includes filename
@@ -478,7 +494,12 @@ async function uploadFile(file, progressCallback) {
             req.upload.onprogress = (e) => progressCallback?.(e.loaded/e.total)
             req.onload = () => resolve(req)
             req.open('post', url, true)
-            req.send(body)
+            getAuthHeader().then((headers) => {
+                headers ??= {}
+                for (const key in headers)
+                    req.setRequestHeader(key, headers[key])
+                req.send(body)
+            })
         })
 
         if (resp.status !== 200) {
@@ -825,6 +846,8 @@ function addAudioPreview(nodeType, isInput=true) {
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
         var element = document.createElement("audio");
         element.controls = true
+        element.style['width'] = "100%"
+        element.style['minHeight'] = "50px"
         const previewNode = this;
         var previewWidget = this.addDOMWidget("audiopreview", "preview", element, {
             serialize: false,
@@ -1007,6 +1030,9 @@ function addVideoPreview(nodeType, isInput=true) {
                     previewWidget.value =  {hidden: false, paused: false}
                 }
                 previewWidget.value.params = {}
+            }
+            if (!Object.entries(params).some(([k,v]) => previewWidget.value.params[k] !== v)) {
+                return
             }
             Object.assign(previewWidget.value.params, params)
             if (!force_update &&
@@ -1591,7 +1617,8 @@ function inner_value_change(widget, value, node, pos) {
 }
 function drawAnnotated(ctx, node, widget_width, y, H) {
   const litegraph_base = LiteGraph
-  const show_text = app.canvas.ds.scale >= (app.canvas.low_quality_zoom_threshold ?? 0.5)
+  // In vueNodes mode, always show text since Vue renders at 1:1 scale
+  const show_text = LiteGraph.vueNodesMode || app.canvas.ds.scale >= (app.canvas.low_quality_zoom_threshold ?? 0.5)
   const margin = 15
   ctx.strokeStyle = litegraph_base.WIDGET_OUTLINE_COLOR
   ctx.fillStyle = litegraph_base.WIDGET_BGCOLOR
@@ -2065,7 +2092,7 @@ app.registerExtension({
                     function get_links(node) {
                         let links = []
                         for (const l of node.outputs[0].links) {
-                            const linkInfo = this.graph.links[l]
+                            const linkInfo = node.graph.links[l]
                             const n = node.graph.getNodeById(linkInfo.target_id)
                             if (n.type == 'Reroute') {
                                 links = links.concat(get_links(n))
@@ -2104,13 +2131,11 @@ app.registerExtension({
                     let [path, remainder] = path_stem(this.widgets[0].value)
                     let params = {path : path}
                     let optionsURL = api.apiURL('/vhs/getpath?' + new URLSearchParams(params));
-                    let options
+                    let options = []
                     try {
                         let resp = await fetch(optionsURL);
                         options = await resp.json();
-                    } catch(e) {
-                        options = []
-                    }
+                    } catch(e) {}
                     options = options.filter((file) => file.startsWith(remainder) && file.endsWith(this.widgets[1].value))
                     if (options.length && this.latest_file != options[options.length-1]) {
                         this.latest_file = path + options[options.length-1]
@@ -2430,7 +2455,14 @@ function getLatentPreviewCtx(id, width, height) {
 
     let previewWidget = node.widgets.find((w) => w.name == "vhslatentpreview")
     if (!previewWidget) {
+        //check for and remove any native preview
+        let nativePreview = node.widgets.findIndex((w) => w.name == '$$canvas-image-preview')
+        if (nativePreview >= 0) {
+            node.imgs = []
+            node.widgets.splice(nativePreview,1)
+        }
         let canvasEl = document.createElement("canvas")
+        canvasEl.style.width = "100%"
         previewWidget = node.addDOMWidget("vhslatentpreview", "vhscanvas", canvasEl, {
             serialize: false,
             hideOnZoom: false,
