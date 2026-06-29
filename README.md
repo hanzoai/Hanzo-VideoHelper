@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/hero.svg" alt="Hanzo-VideoHelper" width="880"></p>
+
 # Hanzo-VideoHelper
 
 **Video I/O suite for the Hanzo ecosystem**
